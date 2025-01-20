@@ -2,37 +2,33 @@ package quic
 
 import (
 	"net"
+	"testing"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/utils"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Closed local connection", func() {
-	It("tells its perspective", func() {
-		conn := newClosedLocalConn(nil, protocol.PerspectiveClient, utils.DefaultLogger)
-		Expect(conn.getPerspective()).To(Equal(protocol.PerspectiveClient))
-		// stop the connection
-		conn.shutdown()
-	})
-
-	It("repeats the packet containing the CONNECTION_CLOSE frame", func() {
-		written := make(chan net.Addr, 1)
-		conn := newClosedLocalConn(
-			func(addr net.Addr, _ *packetInfo) { written <- addr },
-			protocol.PerspectiveClient,
-			utils.DefaultLogger,
-		)
-		addr := &net.UDPAddr{IP: net.IPv4(127, 1, 2, 3), Port: 1337}
-		for i := 1; i <= 20; i++ {
-			conn.handlePacket(&receivedPacket{remoteAddr: addr})
-			if i == 1 || i == 2 || i == 4 || i == 8 || i == 16 {
-				Expect(written).To(Receive(Equal(addr))) // receive the CONNECTION_CLOSE
-			} else {
-				Expect(written).ToNot(Receive())
+func TestClosedLocalConnection(t *testing.T) {
+	written := make(chan net.Addr, 1)
+	conn := newClosedLocalConn(func(addr net.Addr, _ packetInfo) { written <- addr }, utils.DefaultLogger)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 1, 2, 3), Port: 1337}
+	for i := 1; i <= 20; i++ {
+		conn.handlePacket(receivedPacket{remoteAddr: addr})
+		if i == 1 || i == 2 || i == 4 || i == 8 || i == 16 {
+			select {
+			case gotAddr := <-written:
+				require.Equal(t, addr, gotAddr) // receive the CONNECTION_CLOSE
+			default:
+				t.Fatal("expected to receive address")
+			}
+		} else {
+			select {
+			case gotAddr := <-written:
+				t.Fatalf("unexpected address received: %v", gotAddr)
+			default:
+				// Nothing received, which is expected
 			}
 		}
-	})
-})
+	}
+}
