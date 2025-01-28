@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
 type outgoingStream interface {
@@ -60,7 +60,7 @@ func (m *outgoingStreamsMap[T]) OpenStream() (T, error) {
 	// if there are OpenStreamSync calls waiting, return an error here
 	if len(m.openQueue) > 0 || m.nextStream > m.maxStream {
 		m.maybeSendBlockedFrame()
-		return *new(T), streamOpenErr{errTooManyOpenStreams}
+		return *new(T), streamOpenErr{&StreamLimitReachedError{}}
 	}
 	return m.openStream(), nil
 }

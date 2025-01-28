@@ -3,15 +3,15 @@ package main
 import (
 	"log"
 	"math"
-	"math/rand"
-	"net"
+	"net/netip"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/fuzzing/internal/helper"
-	"github.com/lucas-clemente/quic-go/fuzzing/transportparameters"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"golang.org/x/exp/rand"
 
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/fuzzing/internal/helper"
+	"github.com/quic-go/quic-go/fuzzing/transportparameters"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
 func getRandomData(l int) []byte {
@@ -39,7 +39,7 @@ func main() {
 			MaxUniStreamNum:                protocol.StreamNum(getRandomValue()),
 			MaxBidiStreamNum:               protocol.StreamNum(getRandomValue()),
 			MaxIdleTimeout:                 time.Duration(getRandomValue()),
-			ActiveConnectionIDLimit:        getRandomValue(),
+			ActiveConnectionIDLimit:        getRandomValue() + 2,
 		}
 		if rand.Int()%2 == 0 {
 			tp.OriginalDestinationConnectionID = protocol.ParseConnectionID(getRandomData(rand.Intn(21)))
@@ -59,11 +59,13 @@ func main() {
 		if rand.Int()%2 == 0 {
 			var token protocol.StatelessResetToken
 			rand.Read(token[:])
+			var ip4 [4]byte
+			rand.Read(ip4[:])
+			var ip6 [16]byte
+			rand.Read(ip6[:])
 			tp.PreferredAddress = &wire.PreferredAddress{
-				IPv4:                net.IPv4(uint8(rand.Int()), uint8(rand.Int()), uint8(rand.Int()), uint8(rand.Int())),
-				IPv4Port:            uint16(rand.Int()),
-				IPv6:                net.IP(getRandomData(16)),
-				IPv6Port:            uint16(rand.Int()),
+				IPv4:                netip.AddrPortFrom(netip.AddrFrom4(ip4), uint16(rand.Int())),
+				IPv6:                netip.AddrPortFrom(netip.AddrFrom16(ip6), uint16(rand.Int())),
 				ConnectionID:        protocol.ParseConnectionID(getRandomData(rand.Intn(21))),
 				StatelessResetToken: token,
 			}

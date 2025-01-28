@@ -1,14 +1,13 @@
 package quic
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/handshake"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/handshake"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
 type headerDecryptor interface {
@@ -38,16 +37,14 @@ type packetUnpacker struct {
 	cs handshake.CryptoSetup
 
 	shortHdrConnIDLen int
-	version           protocol.VersionNumber
 }
 
 var _ unpacker = &packetUnpacker{}
 
-func newPacketUnpacker(cs handshake.CryptoSetup, shortHdrConnIDLen int, version protocol.VersionNumber) unpacker {
+func newPacketUnpacker(cs handshake.CryptoSetup, shortHdrConnIDLen int) *packetUnpacker {
 	return &packetUnpacker{
 		cs:                cs,
 		shortHdrConnIDLen: shortHdrConnIDLen,
-		version:           version,
 	}
 }
 
@@ -55,7 +52,7 @@ func newPacketUnpacker(cs handshake.CryptoSetup, shortHdrConnIDLen int, version 
 // If the reserved bits are invalid, the error is wire.ErrInvalidReservedBits.
 // If any other error occurred when parsing the header, the error is of type headerParseError.
 // If decrypting the payload fails for any reason, the error is the error returned by the AEAD.
-func (u *packetUnpacker) UnpackLongHeader(hdr *wire.Header, rcvTime time.Time, data []byte) (*unpackedPacket, error) {
+func (u *packetUnpacker) UnpackLongHeader(hdr *wire.Header, data []byte) (*unpackedPacket, error) {
 	var encLevel protocol.EncryptionLevel
 	var extHdr *wire.ExtendedHeader
 	var decrypted []byte
@@ -190,16 +187,14 @@ func (u *packetUnpacker) unpackShortHeader(hd headerDecryptor, data []byte) (int
 
 // The error is either nil, a wire.ErrInvalidReservedBits or of type headerParseError.
 func (u *packetUnpacker) unpackLongHeader(hd headerDecryptor, hdr *wire.Header, data []byte) (*wire.ExtendedHeader, error) {
-	extHdr, err := unpackLongHeader(hd, hdr, data, u.version)
+	extHdr, err := unpackLongHeader(hd, hdr, data)
 	if err != nil && err != wire.ErrInvalidReservedBits {
 		return nil, &headerParseError{err: err}
 	}
 	return extHdr, err
 }
 
-func unpackLongHeader(hd headerDecryptor, hdr *wire.Header, data []byte, version protocol.VersionNumber) (*wire.ExtendedHeader, error) {
-	r := bytes.NewReader(data)
-
+func unpackLongHeader(hd headerDecryptor, hdr *wire.Header, data []byte) (*wire.ExtendedHeader, error) {
 	hdrLen := hdr.ParsedLen()
 	if protocol.ByteCount(len(data)) < hdrLen+4+16 {
 		//nolint:stylecheck
@@ -216,7 +211,7 @@ func unpackLongHeader(hd headerDecryptor, hdr *wire.Header, data []byte, version
 		data[hdrLen:hdrLen+4],
 	)
 	// 3. parse the header (and learn the actual length of the packet number)
-	extHdr, parseErr := hdr.ParseExtended(r, version)
+	extHdr, parseErr := hdr.ParseExtended(data)
 	if parseErr != nil && parseErr != wire.ErrInvalidReservedBits {
 		return nil, parseErr
 	}

@@ -6,117 +6,148 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand"
-	"net"
+	"testing"
+	"time"
 
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/logging"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type connIDGenerator struct {
-	length int
+	Length int
 }
 
+var _ quic.ConnectionIDGenerator = &connIDGenerator{}
+
 func (c *connIDGenerator) GenerateConnectionID() (quic.ConnectionID, error) {
-	b := make([]byte, c.length)
+	b := make([]byte, c.Length)
 	if _, err := rand.Read(b); err != nil {
-		fmt.Fprintf(GinkgoWriter, "generating conn ID failed: %s", err)
+		return quic.ConnectionID{}, fmt.Errorf("generating conn ID failed: %w", err)
 	}
 	return protocol.ParseConnectionID(b), nil
 }
 
-func (c *connIDGenerator) ConnectionIDLen() int {
-	return c.length
+func (c *connIDGenerator) ConnectionIDLen() int { return c.Length }
+
+func randomConnIDLen() int { return 2 + int(mrand.Int31n(19)) }
+
+func TestConnectionIDsZeroLength(t *testing.T) {
+	testTransferWithConnectionIDs(t, randomConnIDLen(), 0, nil, nil)
 }
 
-var _ = Describe("Connection ID lengths tests", func() {
-	randomConnIDLen := func() int {
-		return 4 + int(mrand.Int31n(15))
+func TestConnectionIDsRandomLengths(t *testing.T) {
+	testTransferWithConnectionIDs(t, randomConnIDLen(), randomConnIDLen(), nil, nil)
+}
+
+func TestConnectionIDsCustomGenerator(t *testing.T) {
+	testTransferWithConnectionIDs(t, 0, 0,
+		&connIDGenerator{Length: randomConnIDLen()},
+		&connIDGenerator{Length: randomConnIDLen()},
+	)
+}
+
+// connIDLen is ignored when connIDGenerator is set
+func testTransferWithConnectionIDs(
+	t *testing.T,
+	serverConnIDLen, clientConnIDLen int,
+	serverConnIDGenerator, clientConnIDGenerator quic.ConnectionIDGenerator,
+) {
+	t.Helper()
+
+	if serverConnIDGenerator != nil {
+		t.Logf("using %d byte connection ID generator for the server", serverConnIDGenerator.ConnectionIDLen())
+	} else {
+		t.Logf("issuing %d byte connection ID from the server", serverConnIDLen)
+	}
+	if clientConnIDGenerator != nil {
+		t.Logf("using %d byte connection ID generator for the client", clientConnIDGenerator.ConnectionIDLen())
+	} else {
+		t.Logf("issuing %d byte connection ID from the client", clientConnIDLen)
 	}
 
-	runServer := func(conf *quic.Config) quic.Listener {
-		GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID for the server\n", conf.ConnectionIDLength)))
-		ln, err := quic.ListenAddr("localhost:0", getTLSConfig(), conf)
-		Expect(err).ToNot(HaveOccurred())
-		go func() {
-			defer GinkgoRecover()
-			for {
-				conn, err := ln.Accept(context.Background())
-				if err != nil {
-					return
-				}
-				go func() {
-					defer GinkgoRecover()
-					str, err := conn.OpenStream()
-					Expect(err).ToNot(HaveOccurred())
-					defer str.Close()
-					_, err = str.Write(PRData)
-					Expect(err).ToNot(HaveOccurred())
-				}()
-			}
-		}()
-		return ln
+	// setup server
+	serverTr := &quic.Transport{
+		Conn:                  newUPDConnLocalhost(t),
+		ConnectionIDLength:    serverConnIDLen,
+		ConnectionIDGenerator: serverConnIDGenerator,
+	}
+	defer serverTr.Close()
+	addTracer(serverTr)
+	serverCounter, serverTracer := newPacketTracer()
+	ln, err := serverTr.Listen(
+		getTLSConfig(),
+		getQuicConfig(&quic.Config{
+			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+				return serverTracer
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	// setup client
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var conn quic.Connection
+	clientCounter, clientTracer := newPacketTracer()
+	clientQUICConf := getQuicConfig(&quic.Config{
+		Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+			return clientTracer
+		},
+	})
+	if clientConnIDGenerator == nil && clientConnIDLen == 0 {
+		conn, err = quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), clientQUICConf)
+		require.NoError(t, err)
+	} else {
+		clientTr := &quic.Transport{
+			Conn:                  newUPDConnLocalhost(t),
+			ConnectionIDLength:    clientConnIDLen,
+			ConnectionIDGenerator: clientConnIDGenerator,
+		}
+		defer clientTr.Close()
+		addTracer(clientTr)
+		conn, err = clientTr.Dial(ctx, ln.Addr(), getTLSClientConfig(), clientQUICConf)
+		require.NoError(t, err)
 	}
 
-	runClient := func(addr net.Addr, conf *quic.Config) {
-		GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID for the client\n", conf.ConnectionIDLength)))
-		cl, err := quic.DialAddr(
-			fmt.Sprintf("localhost:%d", addr.(*net.UDPAddr).Port),
-			getTLSClientConfig(),
-			conf,
-		)
-		Expect(err).ToNot(HaveOccurred())
-		defer cl.CloseWithError(0, "")
-		str, err := cl.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		data, err := io.ReadAll(str)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(data).To(Equal(PRData))
+	serverConn, err := ln.Accept(context.Background())
+	require.NoError(t, err)
+	serverStr, err := serverConn.OpenStream()
+	require.NoError(t, err)
+
+	go func() {
+		serverStr.Write(PRData)
+		serverStr.Close()
+	}()
+
+	str, err := conn.AcceptStream(context.Background())
+	require.NoError(t, err)
+	data, err := io.ReadAll(str)
+	require.NoError(t, err)
+	require.Equal(t, PRData, data)
+
+	conn.CloseWithError(0, "")
+	serverConn.CloseWithError(0, "")
+
+	for _, p := range serverCounter.getRcvdShortHeaderPackets() {
+		expectedLen := serverConnIDLen
+		if serverConnIDGenerator != nil {
+			expectedLen = serverConnIDGenerator.ConnectionIDLen()
+		}
+		if !assert.Equal(t, expectedLen, p.hdr.DestConnectionID.Len(), "server conn length mismatch") {
+			break
+		}
 	}
-
-	It("downloads a file using a 0-byte connection ID for the client", func() {
-		serverConf := getQuicConfig(&quic.Config{
-			ConnectionIDLength: randomConnIDLen(),
-			Versions:           []protocol.VersionNumber{protocol.VersionTLS},
-		})
-		clientConf := getQuicConfig(&quic.Config{
-			Versions: []protocol.VersionNumber{protocol.VersionTLS},
-		})
-
-		ln := runServer(serverConf)
-		defer ln.Close()
-		runClient(ln.Addr(), clientConf)
-	})
-
-	It("downloads a file when both client and server use a random connection ID length", func() {
-		serverConf := getQuicConfig(&quic.Config{
-			ConnectionIDLength: randomConnIDLen(),
-			Versions:           []protocol.VersionNumber{protocol.VersionTLS},
-		})
-		clientConf := getQuicConfig(&quic.Config{
-			ConnectionIDLength: randomConnIDLen(),
-			Versions:           []protocol.VersionNumber{protocol.VersionTLS},
-		})
-
-		ln := runServer(serverConf)
-		defer ln.Close()
-		runClient(ln.Addr(), clientConf)
-	})
-
-	It("downloads a file when both client and server use a custom connection ID generator", func() {
-		serverConf := getQuicConfig(&quic.Config{
-			Versions:              []protocol.VersionNumber{protocol.VersionTLS},
-			ConnectionIDGenerator: &connIDGenerator{length: randomConnIDLen()},
-		})
-		clientConf := getQuicConfig(&quic.Config{
-			Versions:              []protocol.VersionNumber{protocol.VersionTLS},
-			ConnectionIDGenerator: &connIDGenerator{length: randomConnIDLen()},
-		})
-
-		ln := runServer(serverConf)
-		defer ln.Close()
-		runClient(ln.Addr(), clientConf)
-	})
-})
+	for _, p := range clientCounter.getRcvdShortHeaderPackets() {
+		expectedLen := clientConnIDLen
+		if clientConnIDGenerator != nil {
+			expectedLen = clientConnIDGenerator.ConnectionIDLen()
+		}
+		if !assert.Equal(t, expectedLen, p.hdr.DestConnectionID.Len(), "client conn length mismatch") {
+			break
+		}
+	}
+}
